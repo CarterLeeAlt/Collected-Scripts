@@ -1089,7 +1089,7 @@ function checkGrub() {
 	GRUBDIR=""
 	GRUBFILE=""
 	for Count in "$4" "$5"; do
-		GRUBFILE=$(find "$6" -name "$Count")
+		GRUBFILE=$(find "$6" -name "$Count" 2>/dev/null)
 		if [[ -n "$GRUBFILE" ]]; then
 			GRUBDIR=$(echo "$GRUBFILE" | sed "s/$Count//g")
 			GRUBFILE="$Count"
@@ -1321,6 +1321,7 @@ function checkVirt() {
 function checkSys() {
     # ... (保留原有的 AliYunDun 和 swapspace 逻辑)
 
+	swapoff /swapspace
     rm -rf /swapspace
     # Allocate 512 MB temporary swap to provent yum dead.
     if [[ ! -e "/swapspace" ]]; then
