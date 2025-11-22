@@ -272,9 +272,9 @@ while [[ $# -ge 1 ]]; do
 		setDisk="$1"
 		shift
 		;;
-	-swap | -virtualmemory | -virtualram)
+	- | -virtualmemory | -virtualram)
 		shift
-		setSwap="$1"
+		set="$1"
 		shift
 		;;
 	-partition)
@@ -774,15 +774,15 @@ function diskType() {
 # https://blog.adachin.me/archives/3621
 # https://www.cnblogs.com/hukey/p/14919346.html
 #
-# $1 is "$linux_relese", $2 is "$disksNum", $3 is "$setSwap", $4 is "$setDisk", $5 is "$partitionTable", $6 is "$setFileSystem", $7 is "$EfiSupport", $8 is "$diskCapacity", $9 is "$IncDisk", ${10} is "$AllDisks".
+# $1 is "$linux_relese", $2 is "$disksNum", $3 is "$set", $4 is "$setDisk", $5 is "$partitionTable", $6 is "$setFileSystem", $7 is "$EfiSupport", $8 is "$diskCapacity", $9 is "$IncDisk", ${10} is "$AllDisks".
 function setNormalRecipe() {
-	[[ -n "$3" && $(echo "$3" | grep -o '[0-9]') ]] && swapSpace="$setSwap" || swapSpace='0'
+	[[ -n "$3" && $(echo "$3" | grep -o '[0-9]') ]] && Space="$set" || Space='0'
 	if [[ "$1" == 'debian' ]] || [[ "$1" == 'kali' ]]; then
 		[[ "$lowMemMode" == "1" ]] && {
-			[[ -z "$swapSpace" || "$swapSpace" -lt "512" ]] && swapSpace="512"
+			[[ -z "$Space" || "$Space" -lt "512" ]] && Space="512"
 		}
-		if [[ -n "$swapSpace" && "$swapSpace" -gt "0" ]]; then
-			swapSpace=$(awk 'BEGIN{print '${swapSpace}'*1.05078125 }' | cut -d '.' -f '1')
+		if [[ -n "$Space" && "$Space" -gt "0" ]]; then
+			Space=$(awk 'BEGIN{print '${swapSpace}'*1.05078125 }' | cut -d '.' -f '1')
 			swapRecipe=''${swapSpace}' 200 '${swapSpace}' linux-swap method{ swap } format{ } .'
 		else
 			swapRecipe=""
@@ -1320,9 +1320,20 @@ function checkVirt() {
 
 function checkSys() {
     # ... (保留原有的 AliYunDun 和 swapspace 逻辑)
+	# 检查是否有启用的 swap
+	if grep -q "swap" /proc/swaps; then
+	    echo "检测到 swap 已启用，正在关闭..."
+		swapoff /swapspace
+	    rm -rf /swapspace
+	    if [ $? -eq 0 ]; then
+	        echo "swap 已成功关闭。"
+	    else
+	        echo "swapoff 执行失败，请检查系统日志。"
+	    fi
+	else
+	    echo "未检测到任何启用的 swap，无需关闭。"
+	fi
 
-	swapoff /swapspace
-    rm -rf /swapspace
     # Allocate 512 MB temporary swap to provent yum dead.
     if [[ ! -e "/swapspace" ]]; then
         fallocate -l 512M /swapspace
