@@ -29,7 +29,7 @@ apt install -y sudo curl wget unzip dnsutils net-tools cron jq
 echo "Wait... Installing tcping..."
 
 bash <(curl -Ls https://raw.githubusercontent.com/nodeseeker/tcping/main/install.sh) --force
-tcping -4 --count 3 www.baidu.com 443
+tcping -4 --count 3 1.1.1.1 80
 
 # ------------------------------------------------------
 # [0/6] Detect region by public IP
@@ -49,8 +49,8 @@ detect_region() {
         return
     fi
 
-    COUNTRY=$(curl -s --max-time 5 cip.cc | grep "地址" | awk -F : '{print $2}' | xargs)
-    if echo "$COUNTRY" | grep -q "中国"; then echo "China"; return; fi
+    COUNTRY=$(curl -s --max-time 5 cip.cc | grep "鍦板潃" | awk -F : '{print $2}' | xargs)
+    if echo "$COUNTRY" | grep -q "涓浗"; then echo "China"; return; fi
 
     echo "Unknown"
 }
@@ -84,6 +84,94 @@ else
     echo "Timezone already set to $TIMEZONE."
     TZ_CHANGED="No"
 fi
+
+# ------------------------------------------------------------
+# Automated script to create and enable a swapfile in Linux.
+# Now fully parameterized with customizable swap size.
+# ------------------------------------------------------------
+# ======= CONFIGURABLE SWAP SIZE =======
+SWAP_SIZE="1G"   # Change this value to the desired size (e.g., 8G, 2G, 512M)
+
+echo "====== Checking current swap status ======"
+free -h
+echo
+sudo swapon --show
+echo
+
+# ------------------------------------------------------------
+# Disable and remove existing swapfile (if exists)
+# ------------------------------------------------------------
+if [ -f /swapfile ]; then
+    echo "Existing swapfile detected. Disabling and removing it..."
+    sudo swapoff /swapfile
+    sudo rm -f /swapfile
+    echo "Old swapfile removed."
+else
+    echo "No existing swapfile found."
+fi
+
+echo
+
+# ------------------------------------------------------------
+# Display disk space
+# ------------------------------------------------------------
+echo "====== Current disk usage ======"
+df -h
+echo
+
+# ------------------------------------------------------------
+# Create new swapfile
+# ------------------------------------------------------------
+echo "====== Creating new swapfile of size $SWAP_SIZE ======"
+sudo fallocate -l $SWAP_SIZE /swapfile
+
+if [ $? -ne 0 ]; then
+    echo "Error: fallocate failed. Please check disk space."
+    exit 1
+fi
+
+echo "Swapfile created:"
+ls -lh /swapfile
+echo
+
+# ------------------------------------------------------------
+# Set permissions and enable swapfile
+# ------------------------------------------------------------
+echo "====== Setting swapfile permissions ======"
+sudo chmod 600 /swapfile
+
+echo "====== Formatting swapfile ======"
+sudo mkswap /swapfile
+
+echo "====== Enabling swap ======"
+sudo swapon /swapfile
+
+echo "Swap is now active:"
+sudo swapon --show
+free -h
+echo
+
+# ------------------------------------------------------------
+# Persist swap in /etc/fstab
+# ------------------------------------------------------------
+echo "====== Configuring persistent swap ======"
+
+sudo cp /etc/fstab /etc/fstab.bak
+echo "Backup created: /etc/fstab.bak"
+
+# Check if entry already exists
+if grep -q "/swapfile" /etc/fstab; then
+    echo "Swapfile entry already exists in /etc/fstab. Skipping."
+else
+    echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+    echo "Swapfile entry added to /etc/fstab."
+fi
+
+echo
+echo "====== Setup complete ======"
+sudo swapon --show
+free -h
+echo "Swap configuration finished successfully and will persist after reboot."
 
 # ------------------------------------------------------
 # [2/6] Enable colored ls output
@@ -147,7 +235,7 @@ echo "2) systemd-resolved (Ubuntu22/Debian12 recommended)"
 echo "-------------------------------------------------------"
 read -p "Select DNS mode [1/2, default=1]: " DNS_MODE
 
-# 回车 = 默认 1
+# 鍥炶溅 = 榛樿 1
 DNS_MODE=${DNS_MODE:-1}
 
 if lsattr "$RESOLV_FILE" 2>/dev/null | grep -q 'i'; then
