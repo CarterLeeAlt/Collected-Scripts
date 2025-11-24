@@ -168,6 +168,7 @@ set_debian_version() {
             ;;
         11|bullseye|oldoldstable)
             set_suite bullseye
+            mirror_host=archive.debian.org
             ;;
         12|bookworm|oldstable)
             set_suite bookworm
@@ -288,29 +289,22 @@ while [ $# -gt 0 ]; do
             dns6='2606:4700:4700::1111 2606:4700:4700::1001'
             ntp=time.cloudflare.com
             ;;
-        --aliyun)
-            dns='223.5.5.5 223.6.6.6'
-            dns6='2400:3200::1 2400:3200:baba::1'
-            mirror_host=mirrors.aliyun.com
-            ntp=time.windows.com
-            ;;
         --ustc|--china)
             dns='223.5.5.5 223.6.6.6'
             dns6='2400:3200::1 2400:3200:baba::1'
             mirror_host=mirrors.ustc.edu.cn
             ntp=time.windows.com
             ;;
-        --tuna)
-            dns='223.5.5.5 223.6.6.6'
-            dns6='2400:3200::1 2400:3200:baba::1'
-            mirror_host=mirrors.tuna.tsinghua.edu.cn
-            ntp=time.windows.com
-            ;;
         --debian-sg)
             dns='8.8.8.8 8.8.4.4'
             dns6='2001:4860:4860::8888 2001:4860:4860::8844'
-            mirror_host=ftp.sg.debian.org
             ntp=time.windows.com
+            if [ "$suite" = bullseye ]; then
+                echo "[INFO] Debian 11 (bullseye) 已 EOL，忽略 --debian-sg，强制使用 archive.debian.org"
+                mirror_host=archive.debian.org
+            else
+                mirror_host=ftp.sg.debian.org
+            fi
             ;;
         --static-ipv4)
             ip=$(ip r get 1.1.1.1 | awk '/src/ {print $7}')
