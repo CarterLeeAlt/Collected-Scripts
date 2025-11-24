@@ -1319,20 +1319,54 @@ function checkVirt() {
 }
 
 function checkSys() {
-    # ... (保留原有的 AliYunDun 和 swapspace 逻辑)
-	# 检查是否有启用的 swap
-	if grep -q "swap" /proc/swaps; then
-	    echo "检测到 swap 已启用，正在关闭..."
-		swapoff /swapspace
-	    rm -rf /swapspace
+	# ------------------------------------------------------------
+	# Disable ALL active swap and remove swapfiles automatically.
+	# ------------------------------------------------------------
+	
+	echo "====== Checking active swap ======"
+	
+	# Get all active swap entries except header
+	ACTIVE_SWAPS=$(grep -v "Filename" /proc/swaps | awk '{print $1}')
+	
+	if [ -n "$ACTIVE_SWAPS" ]; then
+	    echo "Active swap detected:"
+	    echo "$ACTIVE_SWAPS"
+	    echo
+	
+	    echo "====== Disabling all swap ======"
+	    sudo swapoff -a
+	
 	    if [ $? -eq 0 ]; then
-	        echo "swap 已成功关闭。"
+	        echo "All swap has been successfully disabled."
 	    else
-	        echo "swapoff 执行失败，请检查系统日志。"
+	        echo "Error: swapoff failed. Check system logs."
+	        exit 1
 	    fi
+	
+	    echo
+	    echo "====== Removing swapfiles (if any) ======"
+	
+	    for SWAP in $ACTIVE_SWAPS; do
+	        # Only remove swap *files*, not devices (e.g., /dev/sdX)
+	        if [[ "$SWAP" == /* && ! "$SWAP" =~ ^/dev/ ]]; then
+	            echo "Removing swapfile: $SWAP"
+	            sudo rm -f "$SWAP"
+	        else
+	            echo "Skipping non-file swap entry: $SWAP"
+	        fi
+	    done
+	
+	    echo
+	    echo "====== All swapfiles removed (if existed). ======"
+	
 	else
-	    echo "未检测到任何启用的 swap，无需关闭。"
+	    echo "No active swap detected. Nothing to disable."
 	fi
+	
+	echo
+	echo "====== Final swap status ======"
+	sudo swapon --show
+	echo "Done."
 
     # Allocate 512 MB temporary swap to provent yum dead.
     if [[ ! -e "/swapspace" ]]; then
