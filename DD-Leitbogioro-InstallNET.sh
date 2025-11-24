@@ -1320,12 +1320,11 @@ function checkVirt() {
 
 function checkSys() {
 	# ------------------------------------------------------------
-	# Disable ALL active swap and remove swapfiles automatically.
+	# Disable ALL active swap and remove swapfiles + swap partitions
 	# ------------------------------------------------------------
-	
 	echo "====== Checking active swap ======"
 	
-	# Get all active swap entries except header
+	# Get active swap entries except header
 	ACTIVE_SWAPS=$(grep -v "Filename" /proc/swaps | awk '{print $1}')
 	
 	if [ -n "$ACTIVE_SWAPS" ]; then
@@ -1344,26 +1343,33 @@ function checkSys() {
 	    fi
 	
 	    echo
-	    echo "====== Removing swapfiles (if any) ======"
+	    echo "====== Removing swapfiles and swap partitions ======"
 	
 	    for SWAP in $ACTIVE_SWAPS; do
-	        # Only remove swap *files*, not devices (e.g., /dev/sdX)
+	        # case 1 — swapfile
 	        if [[ "$SWAP" == /* && ! "$SWAP" =~ ^/dev/ ]]; then
 	            echo "Removing swapfile: $SWAP"
 	            sudo rm -f "$SWAP"
-	        else
-	            echo "Skipping non-file swap entry: $SWAP"
+	            continue
+	        fi
+	
+	        # case 2 — swap partition (like /dev/sda2, /dev/vda2, /dev/nvme0n1p3)
+	        if [[ "$SWAP" =~ ^/dev/ ]]; then
+	            echo "Detected swap partition: $SWAP"
+	            echo "Wiping swap signature from: $SWAP"
+	            sudo wipefs -a "$SWAP"
+	            echo "$SWAP is no longer a swap partition."
 	        fi
 	    done
 	
 	    echo
-	    echo "====== All swapfiles removed (if existed). ======"
+	    echo "====== All swap entries removed or cleaned. ======"
 	
 	else
 	    echo "No active swap detected. Nothing to disable."
 	fi
-	
 	echo
+	
 	echo "====== Final swap status ======"
 	sudo swapon --show
 	echo "Done."
