@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ======================================================
 # Debian / Ubuntu VPS Configuration Script
-# Improved stable version
+# Improved stable version - manual region selection
 # Compatible with Debian 12 / Ubuntu 22.x / most systemd VPS
 # ======================================================
 
@@ -26,11 +26,22 @@ DNS_MODE_DESC="Unknown"
 DNS_TEST_RESULT="Unknown"
 HOSTNAME_CHANGED="No"
 REGION="International"
-PUBLIC_IP="Unknown"
-COUNTRY_ISO="UNKNOWN"
 NEW_DNS1=""
 NEW_DNS2=""
 GITHUB_RAW_MODE="Direct"
+ROOT_SSH_LOGIN="Unknown"
+ROOT_PASSWORD_AUTH="Unknown"
+ROOT_PASSWD_STATUS="Unknown"
+ROOT_SSH_CONFIG_CHANGED="No"
+ROOT_PASSWD_CHANGED="No"
+APT_MIRROR_NAME="Unknown"
+APT_MIRROR_MAIN="Unknown"
+APT_MIRROR_SECURITY="Unknown"
+APT_MIRROR_CHANGED="No"
+APT_IPV4_CONF="/etc/apt/apt.conf.d/99force-ipv4"
+APT_SOURCES_BACKUP_DIR="/root/apt-sources-backup"
+APT_IPV4_FORCED="No"
+APT_UPDATE_AFTER_MIRROR="Unknown"
 
 # ------------------------------------------------------
 # Logging helpers
@@ -155,6 +166,190 @@ apt_purge_installed() {
     S apt-get autoremove -y || true
 }
 
+report_execution_identity() {
+    local effective_user effective_uid login_user
+
+    effective_user="$(whoami 2>/dev/null || echo unknown)"
+    effective_uid="${EUID:-$(id -u)}"
+    login_user=""
+
+    if command -v logname >/dev/null 2>&1; then
+        login_user="$(logname 2>/dev/null || true)"
+    fi
+
+    if [[ -z "$login_user" && -n "${SUDO_USER:-}" ]]; then
+        login_user="$SUDO_USER"
+    fi
+
+    if [[ -z "$login_user" ]]; then
+        login_user="$(who am i 2>/dev/null | awk '{print $1}' || true)"
+    fi
+
+    if [[ -z "$login_user" ]]; then
+        login_user="$effective_user"
+    fi
+
+    log "Current login user: $login_user"
+    log "Current effective user: $effective_user"
+    log "Current effective UID: $effective_uid"
+
+    if [[ "$effective_uid" -ne 0 ]]; then
+        err "Current script is not running with root privileges."
+        err "Please run with sudo, for example: sudo bash $0"
+        exit 1
+    fi
+
+    if [[ "$login_user" == "root" ]]; then
+        log "Script is being run from a root login session."
+    else
+        log "Login user is not root: $login_user"
+        log "Script is running with root privileges through sudo/elevation."
+    fi
+}
+
+ensure_sshd_managed_block() {
+    local sshd_config="/etc/ssh/sshd_config"
+    local backup_file
+    local tmp_file
+    local managed_block
+    local current_without_block
+    local target_content
+
+    log "Checking SSH root password login configuration..."
+
+    if [[ ! -f "$sshd_config" ]]; then
+        warn "SSH config file not found: $sshd_config. Skipping root SSH login configuration."
+        ROOT_SSH_LOGIN="Skipped (sshd_config missing)"
+        ROOT_PASSWORD_AUTH="Skipped (sshd_config missing)"
+        return 0
+    fi
+
+    backup_file="${sshd_config}.bak.$(date +%Y%m%d%H%M%S)"
+    cp "$sshd_config" "$backup_file"
+    log "Backed up SSH config to: $backup_file"
+
+    managed_block="# BEGIN MANAGED BY DEBIAN INIT SCRIPT - ROOT PASSWORD SSH LOGIN
+PermitRootLogin yes
+PasswordAuthentication yes
+KbdInteractiveAuthentication no
+# END MANAGED BY DEBIAN INIT SCRIPT - ROOT PASSWORD SSH LOGIN"
+
+    tmp_file="$(mktemp /tmp/sshd_config.XXXXXX)"
+
+    awk '
+        /^# BEGIN MANAGED BY DEBIAN INIT SCRIPT - ROOT PASSWORD SSH LOGIN$/ {skip=1; next}
+        /^# END MANAGED BY DEBIAN INIT SCRIPT - ROOT PASSWORD SSH LOGIN$/ {skip=0; next}
+        skip != 1 {print}
+    ' "$sshd_config" > "$tmp_file"
+
+    current_without_block="$(cat "$tmp_file")"
+    target_content="${managed_block}
+
+${current_without_block}"
+
+    if [[ "$(cat "$sshd_config")" == "$target_content" ]]; then
+        log "SSH root/password login managed block is already configured."
+    else
+        printf '%s\n' "$target_content" > "$sshd_config"
+        ROOT_SSH_CONFIG_CHANGED="Yes"
+        log "Enabled SSH root password login options in $sshd_config."
+    fi
+
+    rm -f "$tmp_file"
+
+    mkdir -p /run/sshd 2>/dev/null || true
+
+    if command -v sshd >/dev/null 2>&1; then
+        if sshd -t; then
+            log "SSH configuration syntax check passed."
+        else
+            err "SSH configuration syntax check failed. Restoring backup."
+            cp "$backup_file" "$sshd_config"
+            ROOT_SSH_CONFIG_CHANGED="Rollback"
+            exit 1
+        fi
+    else
+        warn "sshd command not found. Skipping SSH syntax check."
+    fi
+
+    ROOT_SSH_LOGIN="yes"
+    ROOT_PASSWORD_AUTH="yes"
+}
+
+configure_root_password() {
+    local status
+
+    log "Checking root password status..."
+    status="$(passwd -S root 2>/dev/null | awk '{print $2}' || true)"
+
+    case "$status" in
+        P)
+            ROOT_PASSWD_STATUS="Password set"
+            log "Root account currently has a password set."
+            ;;
+        L)
+            ROOT_PASSWD_STATUS="Locked"
+            warn "Root account password is currently locked."
+            ;;
+        NP)
+            ROOT_PASSWD_STATUS="No password"
+            warn "Root account currently has no password."
+            ;;
+        *)
+            ROOT_PASSWD_STATUS="Unknown"
+            warn "Could not determine root password status."
+            ;;
+    esac
+
+    if ask_yes_no "Do you want to set or reset the root password now?" "n"; then
+        log "Launching passwd root. Please enter the new root password twice."
+        if passwd root; then
+            ROOT_PASSWD_CHANGED="Yes"
+            ROOT_PASSWD_STATUS="Password set/updated"
+            log "Root password has been set or updated."
+        else
+            ROOT_PASSWD_CHANGED="Failed"
+            warn "Root password change failed. Continuing with the rest of the script."
+        fi
+    else
+        log "Skipping root password change."
+    fi
+}
+
+restart_ssh_if_needed() {
+    if [[ "$ROOT_SSH_CONFIG_CHANGED" != "Yes" ]]; then
+        log "SSH config was not changed by this step. Skipping SSH service restart."
+        return 0
+    fi
+
+    if ! has_systemd; then
+        warn "systemd not detected; please restart SSH service manually if needed."
+        return 0
+    fi
+
+    log "Restarting SSH service to apply root/password login configuration..."
+    if systemctl restart ssh 2>/dev/null; then
+        log "SSH service restarted: ssh"
+    elif systemctl restart sshd 2>/dev/null; then
+        log "SSH service restarted: sshd"
+    else
+        warn "Failed to restart SSH service. Please check: systemctl status ssh or systemctl status sshd"
+        return 1
+    fi
+}
+
+configure_root_ssh_password_login() {
+    log "====== Configuring SSH root password login ======"
+    ensure_sshd_managed_block
+    configure_root_password
+    restart_ssh_if_needed || true
+
+    log "Current effective SSH root/password login settings:"
+    if [[ -f /etc/ssh/sshd_config ]]; then
+        grep -Ei '^[[:space:]]*(PermitRootLogin|PasswordAuthentication)[[:space:]]+' /etc/ssh/sshd_config || true
+    fi
+}
+
 blacklist_virtio_balloon() {
     local module="virtio_balloon"
 
@@ -190,7 +385,6 @@ detect_physical_memory_mb() {
         exit 1
     fi
 
-    # Round up to a whole MB so the swapfile is at least as large as detected RAM.
     mem_mb=$(( (mem_kb + 1023) / 1024 ))
     echo "$mem_mb"
 }
@@ -220,7 +414,6 @@ fstab_non_swapfile_swap() {
 ensure_swap_fstab_entry() {
     cp /etc/fstab "/etc/fstab.bak.$(date +%Y%m%d%H%M%S)"
 
-    # Keep exactly one standard /swapfile entry to avoid duplicate fstab rows.
     sed -i '/^[[:space:]]*\/swapfile[[:space:]].*[[:space:]]swap[[:space:]]/d' /etc/fstab
     echo '/swapfile none swap sw 0 0' >> /etc/fstab
     log "Ensured a single standard /swapfile entry in /etc/fstab."
@@ -244,30 +437,295 @@ dns_already_configured() {
     grep -qE "^[[:space:]]*nameserver[[:space:]]+${NEW_DNS2}[[:space:]]*$" "$RESOLV_FILE"
 }
 
-detect_region() {
-    local iso ip_info iso_line
+# ------------------------------------------------------
+# Manual region selection
+# ------------------------------------------------------
+select_region_manually() {
+    local input
 
-    ip_info="$(curl -fsS --max-time 5 https://ipapi.co/json 2>/dev/null || true)"
-    iso="$(echo "$ip_info" | jq -r '.country // empty' 2>/dev/null || true)"
-    if [[ -n "$iso" && "$iso" != "null" ]]; then
-        echo "$iso"
+    echo
+    echo "VPS Region Selection"
+    echo "-------------------------------------------------------"
+    echo "1) China / Mainland China VPS"
+    echo "2) International / Non-China VPS"
+    echo
+
+    if ! is_interactive; then
+        warn "Non-interactive shell detected. Defaulting to International."
+        REGION="International"
+        GITHUB_RAW_MODE="Direct"
         return 0
     fi
 
-    ip_info="$(curl -fsS --max-time 5 https://ipinfo.io/json 2>/dev/null || true)"
-    iso="$(echo "$ip_info" | jq -r '.country // empty' 2>/dev/null || true)"
-    if [[ -n "$iso" && "$iso" != "null" ]]; then
-        echo "$iso"
+    while true; do
+        read -r -p "Please select VPS region [1/2] (default: 2): " input
+        input="${input:-2}"
+
+        case "$input" in
+            1|cn|CN|china|China|CHINA|国内|中国)
+                REGION="China"
+                GITHUB_RAW_MODE="gh-proxy.com"
+                log "Selected VPS region: China"
+                log "GitHub Raw Download Mode: gh-proxy.com"
+                return 0
+                ;;
+            2|intl|INTL|international|International|INTERNATIONAL|foreign|Foreign|国外|海外)
+                REGION="International"
+                GITHUB_RAW_MODE="Direct"
+                log "Selected VPS region: International"
+                log "GitHub Raw Download Mode: Direct"
+                return 0
+                ;;
+            *)
+                warn "Invalid selection. Please enter 1 for China or 2 for International."
+                ;;
+        esac
+    done
+}
+
+
+# ------------------------------------------------------
+# APT mirror selection and IPv4-only configuration
+# ------------------------------------------------------
+select_apt_mirror_manually() {
+    local input
+
+    echo
+    echo "APT Mirror Selection"
+    echo "-------------------------------------------------------"
+
+    if [[ "$REGION" == "China" ]]; then
+        echo "China region mirrors:"
+        echo "1) USTC - mirrors.ustc.edu.cn"
+        echo "2) TUNA - mirrors.tuna.tsinghua.edu.cn"
+        echo
+
+        if ! is_interactive; then
+            warn "Non-interactive shell detected. Defaulting to USTC for China."
+            APT_MIRROR_NAME="USTC"
+            APT_MIRROR_MAIN="https://mirrors.ustc.edu.cn/debian"
+            APT_MIRROR_SECURITY="https://mirrors.ustc.edu.cn/debian-security"
+            return 0
+        fi
+
+        while true; do
+            read -r -p "Please select APT mirror [1/2] (default: 1): " input
+            input="${input:-1}"
+            case "$input" in
+                1|ustc|USTC|中科大|中国科学技术大学)
+                    APT_MIRROR_NAME="USTC"
+                    APT_MIRROR_MAIN="https://mirrors.ustc.edu.cn/debian"
+                    APT_MIRROR_SECURITY="https://mirrors.ustc.edu.cn/debian-security"
+                    return 0
+                    ;;
+                2|tuna|TUNA|清华|清华大学)
+                    APT_MIRROR_NAME="TUNA"
+                    APT_MIRROR_MAIN="https://mirrors.tuna.tsinghua.edu.cn/debian"
+                    APT_MIRROR_SECURITY="https://mirrors.tuna.tsinghua.edu.cn/debian-security"
+                    return 0
+                    ;;
+                *)
+                    warn "Invalid selection. Please enter 1 for USTC or 2 for TUNA."
+                    ;;
+            esac
+        done
+    else
+        echo "International region mirrors:"
+        echo "1) Debian Official CDN - deb.debian.org"
+        echo "2) Japan JAIST - ftp.jaist.ac.jp"
+        echo
+
+        if ! is_interactive; then
+            warn "Non-interactive shell detected. Defaulting to Debian Official CDN for International."
+            APT_MIRROR_NAME="Debian Official CDN"
+            APT_MIRROR_MAIN="https://deb.debian.org/debian"
+            APT_MIRROR_SECURITY="https://deb.debian.org/debian-security"
+            return 0
+        fi
+
+        while true; do
+            read -r -p "Please select APT mirror [1/2] (default: 1): " input
+            input="${input:-1}"
+            case "$input" in
+                1|official|Official|cdn|CDN|debian|Debian|官方|官方源)
+                    APT_MIRROR_NAME="Debian Official CDN"
+                    APT_MIRROR_MAIN="https://deb.debian.org/debian"
+                    APT_MIRROR_SECURITY="https://deb.debian.org/debian-security"
+                    return 0
+                    ;;
+                2|jaist|JAIST|japan|Japan|jp|JP|日本|北陆先端|北陆先端科学技术大学院大学)
+                    APT_MIRROR_NAME="Japan JAIST"
+                    APT_MIRROR_MAIN="https://ftp.jaist.ac.jp/debian"
+                    APT_MIRROR_SECURITY="https://deb.debian.org/debian-security"
+                    return 0
+                    ;;
+                *)
+                    warn "Invalid selection. Please enter 1 for Debian Official CDN or 2 for Japan JAIST."
+                    ;;
+            esac
+        done
+    fi
+}
+
+force_apt_ipv4() {
+    mkdir -p /etc/apt/apt.conf.d
+
+    if [[ -f "$APT_IPV4_CONF" ]] && grep -q 'Acquire::ForceIPv4 "true";' "$APT_IPV4_CONF"; then
+        APT_IPV4_FORCED="Already enabled"
+        log "APT IPv4-only mode is already configured: $APT_IPV4_CONF"
         return 0
     fi
 
-    iso_line="$(curl -fsS --max-time 5 https://cip.cc 2>/dev/null | grep '国家' | awk -F ':' '{print $2}' | xargs || true)"
-    if echo "$iso_line" | grep -q "中国"; then
-        echo "CN"
+    cat > "$APT_IPV4_CONF" <<'EOF'
+Acquire::ForceIPv4 "true";
+EOF
+    APT_IPV4_FORCED="Enabled"
+    log "APT IPv4-only mode enabled: $APT_IPV4_CONF"
+}
+
+apt_codename() {
+    local codename=""
+
+    if command -v lsb_release >/dev/null 2>&1; then
+        codename="$(lsb_release -cs 2>/dev/null || true)"
+    fi
+
+    if [[ -z "$codename" && -f /etc/os-release ]]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        codename="${VERSION_CODENAME:-}"
+    fi
+
+    echo "$codename"
+}
+
+ensure_apt_sources_backup_dir() {
+    mkdir -p "$APT_SOURCES_BACKUP_DIR"
+    chmod 700 "$APT_SOURCES_BACKUP_DIR" 2>/dev/null || true
+}
+
+backup_if_exists() {
+    local target="$1"
+    local backup
+    local base
+
+    if [[ -e "$target" || -L "$target" ]]; then
+        ensure_apt_sources_backup_dir
+        base="$(basename "$target")"
+        backup="${APT_SOURCES_BACKUP_DIR}/${base}.bak.$(date +%Y%m%d%H%M%S)"
+        cp -a "$target" "$backup" 2>/dev/null || true
+        log "Backed up $target to $backup"
+    fi
+}
+
+move_apt_source_backup_out_of_scanned_dir() {
+    local file
+    local target
+
+    ensure_apt_sources_backup_dir
+    shopt -s nullglob
+    for file in /etc/apt/sources.list.d/*.bak* \
+                /etc/apt/sources.list.d/*.disabled* \
+                /etc/apt/sources.list.d/*.save* \
+                /etc/apt/sources.list.d/*.orig*; do
+        if [[ -e "$file" || -L "$file" ]]; then
+            target="${APT_SOURCES_BACKUP_DIR}/$(basename "$file")"
+            if [[ -e "$target" ]]; then
+                target="${target}.$(date +%Y%m%d%H%M%S)"
+            fi
+            mv "$file" "$target" 2>/dev/null || true
+            log "Moved APT backup file out of sources.list.d: $file -> $target"
+        fi
+    done
+    shopt -u nullglob
+}
+
+disable_debian_deb822_sources() {
+    local file
+    local backup
+
+    mkdir -p /etc/apt/sources.list.d
+    ensure_apt_sources_backup_dir
+
+    for file in /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/Debian.sources; do
+        if [[ -f "$file" ]]; then
+            backup="${APT_SOURCES_BACKUP_DIR}/$(basename "$file").disabled.bak.$(date +%Y%m%d%H%M%S)"
+            mv "$file" "$backup"
+            log "Disabled existing Debian DEB822 source file: $file -> $backup"
+        fi
+    done
+
+    move_apt_source_backup_out_of_scanned_dir
+}
+
+configure_apt_mirror_and_ipv4() {
+    local os_id=""
+    local codename=""
+    local sources_file="/etc/apt/sources.list"
+
+    log "====== Configuring APT mirror and forcing IPv4 ======"
+
+    force_apt_ipv4
+
+    if [[ -f /etc/os-release ]]; then
+        # shellcheck disable=SC1091
+        . /etc/os-release
+        os_id="${ID:-}"
+    fi
+
+    if [[ "$os_id" != "debian" ]]; then
+        warn "Current OS ID is '${os_id:-unknown}', not Debian. APT IPv4 was configured, but Debian mirror rewrite is skipped."
+        APT_MIRROR_CHANGED="Skipped (not Debian)"
         return 0
     fi
 
-    echo "UNKNOWN"
+    codename="$(apt_codename)"
+    if [[ -z "$codename" ]]; then
+        warn "Could not detect Debian codename. Defaulting to bookworm for Debian 12."
+        codename="bookworm"
+    fi
+
+    if [[ "$codename" != "bookworm" ]]; then
+        warn "Detected Debian codename '$codename'. This script is tuned for Debian 12 bookworm; applying the same Debian mirror template with detected codename."
+    fi
+
+    select_apt_mirror_manually
+
+    backup_if_exists "$sources_file"
+    disable_debian_deb822_sources
+
+    cat > "$sources_file" <<EOF
+# Debian APT sources managed by this VPS configuration script
+# Mirror: ${APT_MIRROR_NAME}
+
+deb ${APT_MIRROR_MAIN}/ ${codename} main contrib non-free non-free-firmware
+# deb-src ${APT_MIRROR_MAIN}/ ${codename} main contrib non-free non-free-firmware
+
+deb ${APT_MIRROR_MAIN}/ ${codename}-updates main contrib non-free non-free-firmware
+# deb-src ${APT_MIRROR_MAIN}/ ${codename}-updates main contrib non-free non-free-firmware
+
+deb ${APT_MIRROR_MAIN}/ ${codename}-backports main contrib non-free non-free-firmware
+# deb-src ${APT_MIRROR_MAIN}/ ${codename}-backports main contrib non-free non-free-firmware
+
+deb ${APT_MIRROR_SECURITY}/ ${codename}-security main contrib non-free non-free-firmware
+# deb-src ${APT_MIRROR_SECURITY}/ ${codename}-security main contrib non-free non-free-firmware
+EOF
+
+    APT_MIRROR_CHANGED="Yes"
+    log "APT mirror configured: $APT_MIRROR_NAME"
+    log "Main mirror: $APT_MIRROR_MAIN"
+    log "Security mirror: $APT_MIRROR_SECURITY"
+
+    move_apt_source_backup_out_of_scanned_dir
+
+    log "Updating APT package index using the selected mirror..."
+    if S apt-get update -y; then
+        APT_UPDATE_AFTER_MIRROR="Success"
+        log "APT package index updated successfully."
+    else
+        APT_UPDATE_AFTER_MIRROR="Failed"
+        warn "APT package index update failed. The script will continue, but package installation may fail."
+    fi
 }
 
 github_raw_url() {
@@ -307,32 +765,27 @@ curl_github_raw_to_file() {
 # Start
 # ------------------------------------------------------
 log "=== Starting Debian/Ubuntu system configuration... ==="
+report_execution_identity
+
+# ------------------------------------------------------
+# [0/7] Select region manually and configure APT mirror
+# Must run before apt installs and any raw.githubusercontent.com download
+# ------------------------------------------------------
+log "[0/7] Selecting VPS region manually..."
+select_region_manually
+
+log "Assigned Region: ${REGION}"
+log "GitHub Raw Download Mode: ${GITHUB_RAW_MODE}"
+
+log "[0/7] Configuring Debian APT mirror and forcing IPv4..."
+configure_apt_mirror_and_ipv4
+
+echo "iperf3 iperf3/start_daemon boolean false" | debconf-set-selections
 
 apt_install_missing sudo curl wget unzip dnsutils tree net-tools cron jq nano htop ca-certificates lsb-release iperf3 2>/dev/null \
     || warn "Some base packages failed to install, continuing..."
 
-# ------------------------------------------------------
-# [0/6] Detect region by public IP
-# Must run before any raw.githubusercontent.com download
-# ------------------------------------------------------
-log "[0/6] Detecting region based on public IP..."
-
-PUBLIC_IP="$(curl -fsS --max-time 5 https://ipinfo.io/ip 2>/dev/null || curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || echo "Unknown")"
-COUNTRY_ISO="$(detect_region)"
-
-if [[ "$COUNTRY_ISO" == "CN" ]]; then
-    REGION="China"
-    GITHUB_RAW_MODE="gh-proxy.com"
-else
-    REGION="International"
-    GITHUB_RAW_MODE="Direct"
-    [[ "$COUNTRY_ISO" == "UNKNOWN" ]] && warn "Failed to detect region automatically. Defaulting to International."
-fi
-
-log "Detected Public IP: ${PUBLIC_IP}"
-log "Detected Country ISO: ${COUNTRY_ISO}"
-log "Assigned Region: ${REGION}"
-log "GitHub Raw Download Mode: ${GITHUB_RAW_MODE}"
+configure_root_ssh_password_login
 
 apt_purge_installed lrzsz
 
@@ -340,7 +793,6 @@ blacklist_virtio_balloon
 
 curl_github_raw_to_stdout "https://raw.githubusercontent.com/uselibrary/memoryCheck/main/memoryCheck.sh" | bash
 
-# hash is shell builtin; do not run through sudo
 hash -r 2>/dev/null || true
 
 # ------------------------------------------------------
@@ -386,9 +838,9 @@ else
 fi
 
 # ------------------------------------------------------
-# [1/6] Set timezone + NTP
+# [1/7] Set timezone + NTP
 # ------------------------------------------------------
-log "[1/6] Setting timezone..."
+log "[1/7] Setting timezone..."
 
 CURRENT_TZ=""
 if command -v timedatectl >/dev/null 2>&1; then
@@ -459,9 +911,16 @@ if [[ "$CREATE_SWAP" != "y" ]]; then
     swapon --show || true
     echo
 else
-    REQUIRED_MB="$(detect_physical_memory_mb)"
+    REAL_MEM_MB="$(detect_physical_memory_mb)"
+    if (( REAL_MEM_MB < 1024 )); then
+        REQUIRED_MB=$(( REAL_MEM_MB * 2 ))
+        SWAP_SIZE_RULE="2x RAM because physical memory is below 1024 MB"
+    else
+        REQUIRED_MB="$REAL_MEM_MB"
+        SWAP_SIZE_RULE="1x RAM because physical memory is 1024 MB or above"
+    fi
     SWAP_SIZE="${REQUIRED_MB}M"
-    log "User selected: create swapfile. Detected RAM: ${REQUIRED_MB} MB. Target swapfile size: ${SWAP_SIZE}."
+    log "User selected: create swapfile. Detected RAM: ${REAL_MEM_MB} MB. Swap rule: ${SWAP_SIZE_RULE}. Target swapfile size: ${SWAP_SIZE}."
 
     ACTIVE_OTHER_SWAP="$(active_non_swapfile_swap)"
     if [[ -n "$ACTIVE_OTHER_SWAP" ]]; then
@@ -499,7 +958,6 @@ else
                 AVAILABLE_KB="$(df --output=avail / | tail -1 | tr -d ' ' 2>/dev/null || echo 0)"
                 AVAILABLE_MB=$((AVAILABLE_KB / 1024))
 
-                # Keep a small safety margin so the root filesystem is not filled completely.
                 RESERVED_MB=512
 
                 log "Available space: ${AVAILABLE_MB} MB"
@@ -542,9 +1000,9 @@ fi
 log "Swap configuration finished."
 
 # ------------------------------------------------------
-# [2/6] Colored ls output
+# [2/7] Colored ls output
 # ------------------------------------------------------
-log "[2/6] Configuring colored ls output..."
+log "[2/7] Configuring colored ls output..."
 touch "$BASHRC"
 if ! bashrc_has_ls_color; then
     echo "alias ls='ls --color=auto'" >> "$BASHRC"
@@ -554,9 +1012,9 @@ else
 fi
 
 # ------------------------------------------------------
-# [3/6] 256-color terminal
+# [3/7] 256-color terminal
 # ------------------------------------------------------
-log "[3/6] Configuring terminal colors..."
+log "[3/7] Configuring terminal colors..."
 if ! bashrc_has_term_color; then
     echo "export TERM=xterm-256color" >> "$BASHRC"
     TERM_COLOR="Enabled"
@@ -565,9 +1023,9 @@ else
 fi
 
 # ------------------------------------------------------
-# [4/6] dircolors
+# [4/7] dircolors
 # ------------------------------------------------------
-log "[4/6] Setting up dircolors..."
+log "[4/7] Setting up dircolors..."
 if [[ ! -f "$DIRCOLORS" ]]; then
     if command -v dircolors >/dev/null 2>&1; then
         dircolors -p > "$DIRCOLORS"
@@ -587,9 +1045,9 @@ else
 fi
 
 # ------------------------------------------------------
-# [5/6] DNS configuration (Static resolv.conf only)
+# [5/7] DNS configuration (Static resolv.conf only)
 # ------------------------------------------------------
-log "[5/6] Updating DNS configuration based on region..."
+log "[5/7] Updating DNS configuration based on region..."
 
 if [[ "$REGION" == "China" ]]; then
     NEW_DNS1="223.5.5.5"
@@ -655,9 +1113,9 @@ safe_chattr_add_immutable "$RESOLV_FILE"
 log "DNS Test Result: $DNS_TEST_RESULT"
 
 # ------------------------------------------------------
-# [6/6] Hostname handling
+# [6/7] Hostname handling
 # ------------------------------------------------------
-log "[6/6] Detecting OS version..."
+log "[6/7] Detecting OS version..."
 
 if [[ -f /etc/os-release ]]; then
     . /etc/os-release
@@ -739,9 +1197,19 @@ fi
 echo
 echo "=== Configuration Summary ==="
 echo "Region: $REGION"
-echo "Public IP: $PUBLIC_IP"
-echo "Country ISO: $COUNTRY_ISO"
 echo "GitHub Raw Mode: $GITHUB_RAW_MODE"
+echo "APT Mirror: $APT_MIRROR_NAME"
+echo "  Main: $APT_MIRROR_MAIN"
+echo "  Security: $APT_MIRROR_SECURITY"
+echo "  Mirror Changed: $APT_MIRROR_CHANGED"
+echo "  Force IPv4: $APT_IPV4_FORCED ($APT_IPV4_CONF)"
+echo "  APT backup dir: $APT_SOURCES_BACKUP_DIR"
+echo "  apt-get update after mirror: $APT_UPDATE_AFTER_MIRROR"
+echo "Root SSH login: $ROOT_SSH_LOGIN"
+echo "SSH password authentication: $ROOT_PASSWORD_AUTH"
+echo "Root password status: $ROOT_PASSWD_STATUS"
+echo "Root SSH config changed: $ROOT_SSH_CONFIG_CHANGED"
+echo "Root password changed: $ROOT_PASSWD_CHANGED"
 echo "Timezone: $TIMEZONE (Changed: $TZ_CHANGED)"
 echo "Hostname: $(hostname 2>/dev/null || echo unknown) (Changed: $HOSTNAME_CHANGED)"
 echo "DNS Mode: $DNS_MODE_DESC"
