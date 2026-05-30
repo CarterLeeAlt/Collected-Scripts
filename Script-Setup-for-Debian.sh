@@ -39,9 +39,9 @@ APT_MIRROR_MAIN="Unknown"
 APT_MIRROR_SECURITY="Unknown"
 APT_MIRROR_CHANGED="No"
 APT_IPV4_CONF="/etc/apt/apt.conf.d/99force-ipv4"
-APT_SOURCES_BACKUP_DIR="/root/apt-sources-backup"
 APT_IPV4_FORCED="No"
 APT_UPDATE_AFTER_MIRROR="Unknown"
+UFW_STATUS="Unknown"
 
 # ------------------------------------------------------
 # Logging helpers
@@ -338,6 +338,32 @@ restart_ssh_if_needed() {
     fi
 }
 
+configure_ufw_block_smtp_25() {
+    log "====== Configuring UFW firewall: allow all except SMTP 25 ======"
+
+    apt_install_missing ufw || {
+        UFW_STATUS="Failed (ufw install failed)"
+        warn "UFW installation failed. Skipping firewall configuration."
+        return 0
+    }
+
+    log "Resetting existing UFW rules..."
+    yes | ufw reset >/dev/null 2>&1 || true
+
+    log "Setting UFW default policies: allow incoming, allow outgoing."
+    ufw default allow incoming
+    ufw default allow outgoing
+
+    ufw deny in 25/tcp
+    ufw deny out 25/tcp
+
+    ufw --force enable
+
+    UFW_STATUS="$(ufw status verbose 2>/dev/null | head -n 1 | sed 's/^Status: //')"
+    log "UFW status:"
+    ufw status verbose || true
+}
+
 configure_root_ssh_password_login() {
     log "====== Configuring SSH root password login ======"
     ensure_sshd_managed_block
@@ -437,6 +463,62 @@ dns_already_configured() {
     grep -qE "^[[:space:]]*nameserver[[:space:]]+${NEW_DNS2}[[:space:]]*$" "$RESOLV_FILE"
 }
 
+
+update_hosts_ipv4_hostname() {
+    local new_hostname="$1"
+    local tmp_file
+
+    tmp_file="$(mktemp /tmp/hosts.XXXXXX)" || return 1
+
+    awk -v new_hostname="$new_hostname" '
+        BEGIN {
+            n = 0
+            localhost_line = 0
+        }
+
+        # Remove any existing 127.0.1.1 hostname entry first, so the script is idempotent.
+        /^[[:space:]]*127\.0\.1\.1[[:space:]]+/ {
+            next
+        }
+
+        {
+            n++
+            lines[n] = $0
+
+            # The safest and most common Debian/Ubuntu placement is directly below:
+            # 127.0.0.1       localhost
+            if (localhost_line == 0 && $0 ~ /^[[:space:]]*127\.0\.0\.1[[:space:]]+/) {
+                localhost_line = n
+            }
+        }
+
+        END {
+            if (localhost_line > 0) {
+                insert_at = localhost_line + 1
+            } else {
+                insert_at = 1
+            }
+
+            for (i = 1; i <= n; i++) {
+                if (i == insert_at) {
+                    print "127.0.1.1        " new_hostname
+                }
+                print lines[i]
+            }
+
+            if (insert_at == n + 1) {
+                print "127.0.1.1        " new_hostname
+            }
+        }
+    ' "$HOSTS_FILE" > "$tmp_file" || {
+        rm -f "$tmp_file"
+        return 1
+    }
+
+    cat "$tmp_file" > "$HOSTS_FILE"
+    rm -f "$tmp_file"
+}
+
 # ------------------------------------------------------
 # Manual region selection
 # ------------------------------------------------------
@@ -532,7 +614,7 @@ select_apt_mirror_manually() {
     else
         echo "International region mirrors:"
         echo "1) Debian Official CDN - deb.debian.org"
-        echo "2) Japan JAIST - ftp.jaist.ac.jp"
+        echo "2) Debian AWS CDN - cdn-aws.deb.debian.org"
         echo
 
         if ! is_interactive; then
@@ -553,14 +635,14 @@ select_apt_mirror_manually() {
                     APT_MIRROR_SECURITY="https://deb.debian.org/debian-security"
                     return 0
                     ;;
-                2|jaist|JAIST|japan|Japan|jp|JP|日本|北陆先端|北陆先端科学技术大学院大学)
-                    APT_MIRROR_NAME="Japan JAIST"
-                    APT_MIRROR_MAIN="https://ftp.jaist.ac.jp/debian"
+                2|aws|AWS|aws-cdn|AWS-CDN|cloudfront|CloudFront|cdn-aws|CDN-AWS|亚马逊|亚马逊云|aws源)
+                    APT_MIRROR_NAME="Debian AWS CDN"
+                    APT_MIRROR_MAIN="https://cdn-aws.deb.debian.org/debian"
                     APT_MIRROR_SECURITY="https://deb.debian.org/debian-security"
                     return 0
                     ;;
                 *)
-                    warn "Invalid selection. Please enter 1 for Debian Official CDN or 2 for Japan JAIST."
+                    warn "Invalid selection. Please enter 1 for Debian Official CDN or 2 for Debian AWS CDN."
                     ;;
             esac
         done
@@ -599,63 +681,18 @@ apt_codename() {
     echo "$codename"
 }
 
-ensure_apt_sources_backup_dir() {
-    mkdir -p "$APT_SOURCES_BACKUP_DIR"
-    chmod 700 "$APT_SOURCES_BACKUP_DIR" 2>/dev/null || true
-}
 
-backup_if_exists() {
-    local target="$1"
-    local backup
-    local base
-
-    if [[ -e "$target" || -L "$target" ]]; then
-        ensure_apt_sources_backup_dir
-        base="$(basename "$target")"
-        backup="${APT_SOURCES_BACKUP_DIR}/${base}.bak.$(date +%Y%m%d%H%M%S)"
-        cp -a "$target" "$backup" 2>/dev/null || true
-        log "Backed up $target to $backup"
-    fi
-}
-
-move_apt_source_backup_out_of_scanned_dir() {
+remove_debian_deb822_sources() {
     local file
-    local target
-
-    ensure_apt_sources_backup_dir
-    shopt -s nullglob
-    for file in /etc/apt/sources.list.d/*.bak* \
-                /etc/apt/sources.list.d/*.disabled* \
-                /etc/apt/sources.list.d/*.save* \
-                /etc/apt/sources.list.d/*.orig*; do
-        if [[ -e "$file" || -L "$file" ]]; then
-            target="${APT_SOURCES_BACKUP_DIR}/$(basename "$file")"
-            if [[ -e "$target" ]]; then
-                target="${target}.$(date +%Y%m%d%H%M%S)"
-            fi
-            mv "$file" "$target" 2>/dev/null || true
-            log "Moved APT backup file out of sources.list.d: $file -> $target"
-        fi
-    done
-    shopt -u nullglob
-}
-
-disable_debian_deb822_sources() {
-    local file
-    local backup
 
     mkdir -p /etc/apt/sources.list.d
-    ensure_apt_sources_backup_dir
 
     for file in /etc/apt/sources.list.d/debian.sources /etc/apt/sources.list.d/Debian.sources; do
         if [[ -f "$file" ]]; then
-            backup="${APT_SOURCES_BACKUP_DIR}/$(basename "$file").disabled.bak.$(date +%Y%m%d%H%M%S)"
-            mv "$file" "$backup"
-            log "Disabled existing Debian DEB822 source file: $file -> $backup"
+            rm -f "$file"
+            log "Removed existing Debian DEB822 source file without backup: $file"
         fi
     done
-
-    move_apt_source_backup_out_of_scanned_dir
 }
 
 configure_apt_mirror_and_ipv4() {
@@ -691,8 +728,7 @@ configure_apt_mirror_and_ipv4() {
 
     select_apt_mirror_manually
 
-    backup_if_exists "$sources_file"
-    disable_debian_deb822_sources
+    remove_debian_deb822_sources
 
     cat > "$sources_file" <<EOF
 # Debian APT sources managed by this VPS configuration script
@@ -715,8 +751,6 @@ EOF
     log "APT mirror configured: $APT_MIRROR_NAME"
     log "Main mirror: $APT_MIRROR_MAIN"
     log "Security mirror: $APT_MIRROR_SECURITY"
-
-    move_apt_source_backup_out_of_scanned_dir
 
     log "Updating APT package index using the selected mirror..."
     if S apt-get update -y; then
@@ -782,10 +816,12 @@ configure_apt_mirror_and_ipv4
 
 echo "iperf3 iperf3/start_daemon boolean false" | debconf-set-selections
 
-apt_install_missing sudo curl wget unzip dnsutils tree net-tools cron jq nano htop ca-certificates lsb-release iperf3 2>/dev/null \
+apt_install_missing sudo curl wget unzip dnsutils tree net-tools cron jq nano htop ca-certificates lsb-release iperf3 ufw 2>/dev/null \
     || warn "Some base packages failed to install, continuing..."
 
 configure_root_ssh_password_login
+
+configure_ufw_block_smtp_25
 
 apt_purge_installed lrzsz
 
@@ -1147,10 +1183,10 @@ if ask_yes_no "Change hostname to '$AUTO_HOSTNAME'?" "n"; then
 
     safe_chattr_remove_immutable "$HOSTS_FILE"
 
-    if grep -qE '^127\.0\.1\.1\s+' "$HOSTS_FILE" 2>/dev/null; then
-        sed -i -E "s/^127\.0\.1\.1\s+.*/127.0.1.1        $AUTO_HOSTNAME/" "$HOSTS_FILE"
+    if update_hosts_ipv4_hostname "$AUTO_HOSTNAME"; then
+        log "Updated $HOSTS_FILE: placed 127.0.1.1 hostname."
     else
-        echo "127.0.1.1        $AUTO_HOSTNAME" >> "$HOSTS_FILE"
+        warn "Failed to update $HOSTS_FILE automatically. Please check it manually."
     fi
 
     safe_chattr_add_immutable "$HOSTS_FILE"
@@ -1203,7 +1239,7 @@ echo "  Main: $APT_MIRROR_MAIN"
 echo "  Security: $APT_MIRROR_SECURITY"
 echo "  Mirror Changed: $APT_MIRROR_CHANGED"
 echo "  Force IPv4: $APT_IPV4_FORCED ($APT_IPV4_CONF)"
-echo "  APT backup dir: $APT_SOURCES_BACKUP_DIR"
+echo "  APT backups: Disabled"
 echo "  apt-get update after mirror: $APT_UPDATE_AFTER_MIRROR"
 echo "Root SSH login: $ROOT_SSH_LOGIN"
 echo "SSH password authentication: $ROOT_PASSWORD_AUTH"
