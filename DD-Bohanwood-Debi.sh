@@ -291,12 +291,6 @@ while [ $# -gt 0 ]; do
             dns6='2606:4700:4700::1111 2606:4700:4700::1001'
             ntp=time.cloudflare.com
             ;;
-        --debian-hk)
-            dns='1.1.1.1 1.0.0.1'
-            dns6='2001:4860:4860::8888 2001:4860:4860::8844'
-            mirror_host=ftp.hk.debian.org
-            ntp=time.cloudflare.com
-            ;;
         --aliyun)
             dns='223.5.5.5 223.6.6.6'
             dns6='2400:3200::1 2400:3200:baba::1'
@@ -304,13 +298,13 @@ while [ $# -gt 0 ]; do
             ntp=time.amazonaws.cn
             ;;
         --ustc|--china)
-            dns='223.5.5.5 223.6.6.6'
+            dns='119.29.29.29'
             dns6='2402:4e00::'
             mirror_host=mirrors.ustc.edu.cn
             ntp=time.amazonaws.cn
             ;;
         --tuna)
-            dns='223.5.5.5 223.6.6.6'
+            dns='119.29.29.29'
             dns6='2402:4e00::'
             mirror_host=mirrors.tuna.tsinghua.edu.cn
             ntp=time.amazonaws.cn
