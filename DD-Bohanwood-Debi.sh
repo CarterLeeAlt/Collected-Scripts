@@ -283,8 +283,9 @@ while [ $# -gt 0 ]; do
         --cdn)
             ;;
         --aws)
+            dns='1.1.1.1 1.0.0.1'
             mirror_host=cdn-aws.deb.debian.org
-            ntp=time.aws.com
+            ntp=time.cloudflare.com
             ;;
         --cloudflare)
             dns='1.1.1.1 1.0.0.1'
@@ -295,19 +296,19 @@ while [ $# -gt 0 ]; do
             dns='223.5.5.5 223.6.6.6'
             dns6='2400:3200::1 2400:3200:baba::1'
             mirror_host=mirrors.aliyun.com
-            ntp=time.amazonaws.cn
+            ntp=time.cloudflare.com
             ;;
         --ustc|--china)
-            dns='119.29.29.29'
-            dns6='2402:4e00::'
+            dns='223.5.5.5 223.6.6.6'
+            dns6='2400:3200::1 2400:3200:baba::1'
             mirror_host=mirrors.ustc.edu.cn
-            ntp=time.amazonaws.cn
+            ntp=time.cloudflare.com
             ;;
         --tuna)
-            dns='119.29.29.29'
-            dns6='2402:4e00::'
+            dns='223.5.5.5 223.6.6.6'
+            dns6='2400:3200::1 2400:3200:baba::1'
             mirror_host=mirrors.tuna.tsinghua.edu.cn
-            ntp=time.amazonaws.cn
+            ntp=time.cloudflare.com
             ;;
         --static-ipv4)
             ip=$(ip r get 1.1.1.1 | awk '/src/ {print $7}')
